@@ -1,0 +1,754 @@
+---
+---
+---
+
+# Import libraries
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(tibble)
+library(glmnet)
+library(reshape2)
+library(faraway)
+library(lmtest)
+library(ggplot2)
+library(MASS)
+```
+
+# Load the dataset
+
+For the data documentation, click [here](https://jse.amstat.org/v19n3/decock/DataDocumentation.txt).
+
+```{r}
+houses_df = read.csv("ames_houses_data.csv")
+
+# The professor asked us to only use the first 1000 observations
+houses_df = houses_df[1:1000,]
+
+sprintf("The dataset has %d rows", nrow(houses_df))
+sprintf("The dataset has %d columns", ncol(houses_df))
+head(houses_df)
+```
+
+### Remove columns with missing values
+
+```{r}
+# Remove columns with missing values
+houses_df = houses_df[ , colSums(is.na(houses_df)) == 0]
+
+# Remove Pool.Area since all its values are "0"
+houses_df = houses_df[ , !(names(houses_df) %in% c("Pool.Area"))]
+
+sprintf("The dataset has %d rows", nrow(houses_df))
+sprintf("The dataset has %d columns", ncol(houses_df))
+```
+
+### Convert char columns to factor
+
+```{r}
+houses_df[sapply(houses_df, is.character)] <- lapply(houses_df[sapply(houses_df, is.character)], as.factor)
+```
+
+### Creating a full model and applying BIC and AIC technique and comparing
+
+```{r}
+index <- sample(seq_len(nrow(houses_df)), size = 0.8 * nrow(houses_df))
+X_train <- houses_df[index, ]
+X_test <- houses_df[-index, ]
+
+full_model <- lm(price ~ . -PID -price, data = X_train)
+```
+
+### BIC elimination
+
+```{r}
+library(MASS)
+full_model.step.bic <- 
+  stepAIC(full_model, direction = "backward", k=log(1000), trace = 0)
+model.bic <- eval(full_model.step.bic$call)
+summary(model.bic)
+```
+
+### AIC elimination
+
+```{r}
+full_model.step.aic <- 
+  stepAIC(full_model, direction = "backward", k=7, trace = 0)
+model.aic <- eval(full_model.step.aic$call)
+summary(model.aic)
+```
+
+# Predictor selection using lasso
+
+Lasso regression is a regularization technique that can perform predictor selection. In other words, it can set the regression coefficients to zero.
+
+**We note that Lasso has demonstrated a superior ability to identify more relevant predictors compared to AIC and BIC. As a result, we will be adopting the predictors identified by Lasso for future analyses.**
+
+```{r}
+# model.matrix() returns the design matrix X
+# remove the bias column (all 1s)
+X <- model.matrix(price ~ ., houses_df)[, -1]
+y <- houses_df$price
+new_houses_df = data.frame(X, y)
+names(new_houses_df)[names(new_houses_df) == "y"] <- "price"
+```
+
+```{r}
+# alpha = 1 is lasso regression
+fit_lasso <- glmnet(X, y, alpha = 1)
+```
+
+To make our analysis more manageable, we will use a high $\lambda$ value to identify the top 10-15 predictors. We will not use any of the other predictors for our models.
+
+```{r}
+fit_lasso = glmnet(X, y, alpha = 1, lambda = 9000)
+
+# [-c(1)] removes "intercept" 
+selected_predictors = rownames(coef(fit_lasso, s = 'lambda.min'))[coef(fit_lasso, s = 'lambda.min')[,1]!= 0][-c(1)]
+cat(selected_predictors, sep="   ")
+```
+
+**area:** above ground floor area\
+**Lot.Area:** area of the land that comes with the house\
+**NeighborhoodNridgHt:** whether the house is in the Northridge Heights neighborhood (yes/no)\
+**Overall.Qual:** construction quality of the house (1 - 10)**\
+Year.Built:** year the house was built**\
+Year.Remod.Add:** year the house was remodeled (same as Year.Built if house was never remodeled)**\
+Mas.Vnr.TypeStone:** whether the house has a stone masonry veneer (yes/no)**\
+Exter.QualTA:** whether the construction quality of the exterior of the house is average (yes/no)**\
+BsmtFin.SF.1:** area of finished parts of basement**\
+TotalBsmt.SF:** total area of basement**\
+X1st.Flr.SF:** area of first floor**\
+Garage.Cars:** how many cars can fit in the garage**\
+Garage.Area:** area of the garage
+
+```{r}
+# Paste the selected predictors into a formula string
+right_hand_side = paste(selected_predictors, collapse=" + ")
+formula_string = paste("price ~", right_hand_side, collapse = "")
+linear = lm(formula_string, data=new_houses_df)
+```
+
+```{r}
+summary(linear)
+```
+
+The p-value for each predictor corresponds to the hypothesis test:\
+$H_0: \beta_j = 0$\
+$H_a: \beta_j \neq 0$
+
+Predictors with small p-values smaller than 0.05 have a significant linear relationship with the target (house price), given that the other predictors are used in the model.
+
+# Exploratory data analysis
+
+### Histogram of target variable
+
+```{r}
+hist(houses_df$price, 
+     main="The house prices are positively skewed", 
+     xlab="House price")
+abline(v=mean(houses_df$price),col="blue")
+mean_price = format(round(mean(houses_df$price), 0), nsmall=0, big.mark=",")
+text(4e+05, 200, paste("Mean: $", mean_price), cex=1.5)
+```
+
+The target (house price) is positively skewed because there are a few houses that are abnormally expensive.
+
+### Scatterplots of each predictor with house price
+
+```{r}
+for (predictor in selected_predictors) {
+  plot(price ~ eval(parse(text = predictor)), 
+     data=new_houses_df, 
+     xlab=predictor,
+     main=predictor)
+  
+  predictor_linear = lm(price ~ eval(parse(text = predictor)), data=new_houses_df)
+  abline(predictor_linear, lwd = 3, lty = 1, col = "blue")
+}
+```
+
+Most of the predictors have an approximately linear relationship with house price, except `Year.Built`, `Overall.Qual`, and `Garage.Cars`. We will ignore this for now but will address it in our final model.
+
+From the `Lot.Area` plot, we see that there is one house with an abnormally large lot. We will ignore this for now but will address it later.
+
+#### Correlation with target
+
+```{r}
+df_numeric = dplyr::select_if(new_houses_df[,c(selected_predictors, "price")], is.numeric)
+
+# returns the correlation of each predictor with house price
+corr_with_price = cor(df_numeric)[,"price"]
+corr_with_price_ordered = as.data.frame(corr_with_price[order(-corr_with_price)])
+colnames(corr_with_price_ordered) = "Correlation"
+corr_with_price_ordered
+```
+
+`Overall.Qual` and `area` were the most strongly correlated with house price. This means these predictors had the strongest linear relationships with house price.
+
+# Removing multicollinearity
+
+Multicollinear predictors are correlated with each other. This increases the variance of their estimated coefficients. Hence, we want to remove multicollinear predictors to improve the interpretability of our model. A multicollinear predictor has a high variance inflation factor.
+
+### Variance inflation factors
+
+```{r}
+vif(linear)
+```
+
+`Garage.Cars` , `Garage.Area` , `X1st.Flr.SF` , `Total.Bsmt.SF` have large variance inflation factors, so we will investigate the relationships between them using a pair plot.
+
+```{r}
+# Used to plot the correlations in the pair plot
+panel.cor <- function(x, y) {
+  usr <- par("usr")
+  on.exit(par("usr"))
+  par(usr = c(0, 1, 0, 1))
+  r <- round(cor(x, y), digits = 2)
+  # text size
+  text(0.5, 0.5, r, cex=1.5)
+}
+```
+
+```{r}
+pairs(~ Garage.Cars + Garage.Area + Total.Bsmt.SF + X1st.Flr.SF, data=new_houses_df, upper.panel=panel.cor)
+```
+
+```{r}
+sprintf("[Garage.Area - Price] Correlation: %.2f", cor(new_houses_df$Garage.Area, new_houses_df$price))
+sprintf("[Garage.Cars - Price] Correlation: %.2f", cor(new_houses_df$Garage.Cars, new_houses_df$price))
+sprintf("[Total.Bsmt.SF - Price] Correlation: %.2f", cor(new_houses_df$Total.Bsmt.SF, new_houses_df$price))
+sprintf("[X1st.Flr.SF - Price] Correlation: %.2f", cor(new_houses_df$X1st.Flr.SF, new_houses_df$price))
+```
+
+`Garage.Cars`and `Garage.Area` are strongly positively correlated (r = 0.89). This is because a larger garage can fit more cars. We will remove `Garage.Area` since it is less correlated with the target than `Garage.Cars`.
+
+Similarly, `Total.Bsmt.SF` and `X1st.Flr.SF` are strongly positively correlated (r = 0.81). This is because a house with a large 1st floor also tends to have a large basement. We will remove `X1st.Flr.SF` since it is less correlated with the target than `Total.Bsmt.SF`.
+
+```{r}
+predictors_subset = selected_predictors[-which(selected_predictors %in% c('Garage.Area', 'X1st.Flr.SF'))]
+
+# Paste the new predictors into a formula string
+right_hand_side = paste(predictors_subset, collapse=" + ")
+formula_string = paste("price ~", right_hand_side, collapse = "")
+linear= lm(formula_string, data=new_houses_df)
+```
+
+```{r}
+summary(linear)
+```
+
+```{r}
+print(vif(linear))
+```
+
+After removing `Total.Bsmt.SF` and `X1st.Flr.SF` , all the remaining predictors are statistically significant and have small variance inflation factors. This suggests we have removed multicollinearity, which has improved the interpretability of our model.
+
+# Model 1: Original
+
+## 1.1 Influential observations
+
+An observation is influential if its deletion significantly changes the fitted model. An influential observation has both a high leverage and a large standardized residual.
+
+```{r}
+plot(linear, which=5)
+```
+
+Observation 957 is the most influential observation. We will investigate its predictor values to determine why.
+
+```{r}
+new_houses_df[957, c("price", selected_predictors)]
+```
+
+Observation 957 has an abnormally large `Lot.Area` . It is the abnormal observation we identified in our exploratory data analysis.
+
+```{r}
+resid(linear)[957]
+```
+
+Observation 957 has a very large negative residual, indicating our model greatly overestimated its house price. Since this observation greatly changes our fitted model, we will remove it and re-train our model.
+
+```{r}
+new_houses_df = new_houses_df[-c(957), ]
+linear = lm(formula_string, data=new_houses_df)
+```
+
+```{r}
+summary(linear)
+```
+
+```{r, fig.width=5, fig.height=5}
+plot(linear, which=5)
+```
+
+#### Cook's distance
+
+An influential observation has a Cook's distance greater than $4/n$, where $n$ is the no. of observations.
+
+$$
+D_i = \frac{1}{p} \gamma_i^2 (\frac{h_{ii}}{1-h_{ii}})
+$$
+
+```{r}
+influential_indices = which(cooks.distance(linear) > 4 / 
+                            length(cooks.distance(linear)), arr.ind=TRUE)
+length(influential_indices)
+```
+
+#### Outliers
+
+An outlier has an abnormal target value given its predictor value. An outlier is an observation with a standardized residual whose absolute value is greater than 2.
+
+$$
+\gamma_i = \frac{e_i}{\widehat{\sigma}\sqrt{1-h_{ii}}} > 2
+$$
+
+```{r}
+length(which(abs(rstandard(linear)) > 2))
+```
+
+#### High-leverage observations
+
+A high leverage observation has a abnormal predictor values. A high leverage observation has a leverage ($h_{ii}$) that satisfies: $$
+h_{ii} > 2\frac{1}{n}\sum_{i=1}^{n}h_{ii}
+$$
+
+```{r}
+length(which(hatvalues(linear) > 2 * mean(hatvalues(linear))))
+```
+
+## 1.2 Model evaluation
+
+#### PRESS statistic
+
+The PRESS (Prediction Error Sum of Squares) statistic measures the prediction error of a model. It is the same as the leave-one-out cross validation (LOOCV) mean squared error. We will use the square root of the PRESS statistic to get the root mean squared error, because it has the same units as the target (\$USD).
+
+$$
+\text{PRESS} = \frac{1}{n} \sum_{i=1}^{n} e_{[i]}^2 = \frac{1}{n} \sum_{i=1}^{n} (\frac{e_i}{1-h_{ii}})^2
+$$
+
+```{r}
+press = sum((resid(linear) / (1 - hatvalues(linear)))^2) / nrow(new_houses_df)
+loocv_rmse = sqrt(press)
+format_loocv_rmse = format(round(loocv_rmse, 2), nsmall=1, big.mark=",")
+
+paste("LOOCV RMSE: $", format_loocv_rmse)
+```
+
+#### AIC, BIC, Adjusted R-squared
+
+These metrics are used to compare models with different no. of predictors. In other words, they balance goodness of fit and model complexity.
+
+BIC prefers smaller models than AIC. The model with the smallest AIC or BIC is preferred.
+
+R-squared is the proportion of variation in the target (house price) that is explained by the predictors. Since, R-squared always increases as the no. of predictors increases, adjusted R-squared is used instead. The model with the largest adjusted R-squared is preferred.
+
+```{r}
+sprintf("AIC: %.2f", AIC(linear))
+sprintf("BIC: %.2f", BIC(linear))
+sprintf("Adjusted R squared: %.2f", summary(linear)$adj.r.squared)
+```
+
+## 1.3 Model diagnostics
+
+Linear regression makes 4 main assumptions about the data, called the LINE assumptions.
+
+**Linearity:** $y$ has a linear relationship with each predictor.\
+**Independence:** The observations are independent.\
+**Normality:** The residuals follow a normal distribution.\
+**Equal Variance:** The variance of the residuals is equal for all $\hat{y}$.
+
+When these assumptions are violated, we cannot trust our model.
+
+#### Residual plot, Breusch-Pagan test
+
+```{r, fig.width=5, fig.height=5}
+plot(fitted(linear), resid(linear), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Residual plot")
+abline(h = 0, col = "darkorange", lwd = 2)
+```
+
+The linearity assumption is violated because the residuals are not centered around 0.
+
+The Breusch-Pagan test:\
+$H_0: Var(\varepsilon)$ is constant for all $\hat{y}$\
+$H_a: Var(\varepsilon)$ varies depending on $\hat{y}$
+
+```{r}
+bptest(linear)
+```
+
+The constant variance assumption is violated because the variance of the residuals changes with $\hat{y}$ in the residual plot, and the p-value of the Breusch-Pagan test is smaller than 0.05.
+
+#### Normal QQ Plot, Shapiro-Wilk test
+
+```{r, fig.width=5, fig.height=5}
+qqnorm(resid(linear))
+qqline(resid(linear), col = "dodgerblue", lwd = 2)
+```
+
+The Shapiro-Wilk test:\
+$H_0: \varepsilon$ is normally distributed\
+$H_a: \varepsilon$ is not normally distributed
+
+```{r}
+shapiro.test(resid(linear))
+```
+
+The normality assumption is violated because the normal quantile-quantile plot of the residuals does not follow a straight line, and the p-value of the Shapiro-Wilk test is smaller than 0.05.
+
+Our model violates many of the assumptions of linear regression. We will try to fix these violations by transforming the dataset.
+
+# Model 2: Box-Cox transformation
+
+To improve our model, we can transform the target variable using the Box-Cox transformation. This will transform the target variable's distribution so that it resembles a normal distribution.
+
+$$g_\lambda(y)= \left\{\begin{matrix}
+\frac{y^\lambda - 1}{\lambda} & \lambda \neq 0 \\ 
+ln(y) & \lambda = 0
+\end{matrix}\right.
+$$
+
+```{r}
+lambdas = boxcox(linear, plot=FALSE)
+best_lambda <- lambdas$x[which.max(lambdas$y)]
+```
+
+```{r}
+hist(houses_df$price ^ (best_lambda) - 1 / best_lambda, main="Box-Cox(House price) is roughly normally distributed", xlab="Box-Cox(House price)")
+```
+
+```{r}
+right_hand_side = paste(attr(linear$terms , "term.labels"), collapse="+")
+formula_string = paste("((price ^ (best_lambda) - 1) / best_lambda) ~ ", right_hand_side, collapse = "")
+linear_box = lm(as.formula(formula_string), data=new_houses_df)
+```
+
+```{r}
+summary(linear_box)
+```
+
+## 2.1 Influential observations
+
+```{r, fig.width=5, fig.height=5}
+plot(linear_box, which=5)
+```
+
+```{r}
+influential_indices = which(cooks.distance(linear_box) > 4 / 
+                            length(cooks.distance(linear_box)), arr.ind=TRUE)
+length(influential_indices)
+```
+
+The Box-Cox transformation decreased the no. of influential observations.
+
+#### Outliers
+
+```{r}
+outlier_indices = which(abs(rstandard(linear_box)) > 2)
+length(outlier_indices)
+```
+
+The Box-Cox transformation barely changed the no. of outliers.
+
+#### High-leverage observations
+
+```{r}
+length(which(hatvalues(linear_box) > 2 * mean(hatvalues(linear_box))))
+```
+
+The Box-Cox transformation barely changed the no. of high-leverage observations.
+
+## 2.2 Model evaluation
+
+#### PRESS Statistic
+
+```{r}
+y = new_houses_df$price
+y_pred = (best_lambda * fitted(linear_box) + 1) ** (1/best_lambda)
+loocv_rmse = sqrt(sum(((y - y_pred) / (1 - hatvalues(linear_box)))^2) / nrow(new_houses_df))
+format_loocv_rmse = format(round(loocv_rmse, 2), nsmall=1, big.mark=",")
+
+paste("LOOCV RMSE: $", format_loocv_rmse)
+```
+
+The Box-Cox transformation decreased the model's average house price prediction error.
+
+#### AIC, BIC, Adjusted R-squared
+
+```{r}
+sprintf("AIC: %.2f", AIC(linear_box))
+sprintf("BIC: %.2f", BIC(linear_box))
+sprintf("Adjusted R squared: %.2f", summary(linear_box)$adj.r.squared)
+```
+
+The Box-Cox transformation dramatically decreased the AIC and BIC. Furthermore, it slightly increased the adjusted R-squared to 0.89. Since the Box-Cox transformation did not increase the no. of predictors, this indicates it increased the goodness of fit.
+
+## 2.3 Model diagnostics
+
+#### Residual plot, Breusch-Pagan test
+
+```{r, fig.width=5, fig.height=5}
+plot(fitted(linear_box), resid(linear_box), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Residual plot")
+abline(h = 0, col = "darkorange", lwd = 2)
+```
+
+The Box-Cox transformation fixed the violation of the linearity assumption (the residuals are centered around 0 for all fitted values).
+
+```{r}
+bptest(linear_box)
+```
+
+The Box-Cox transformation did not fix the violation of the equal variance assumption.
+
+#### Normal QQ Plot, Shapiro-Wilk test
+
+```{r, fig.width=5, fig.height=5}
+qqnorm(resid(linear_box))
+qqline(resid(linear_box), col = "dodgerblue", lwd = 2)
+```
+
+```{r}
+shapiro.test(resid(linear_box))
+```
+
+The Box-Cox transformation did not fix the violation of the normality assumption.
+
+# Model 3: Higher-order terms
+
+### Power terms
+
+In our exploratory data analysis, we noticed that `Year.Built` and `Overal.Qual` had non-linear relationships with house price (we are ignoring `Garage.Cars` for the sake of time). Since linear regression assumes that each predictor is linearly related to the target, we will try to transform these predictors.
+
+```{r}
+year_linear = lm(price ~ Year.Built, data=new_houses_df)
+year_quad = lm(price ~ Year.Built + I(Year.Built^2), data=new_houses_df)
+
+new.data <- data.frame(Year.Built = seq(from = min(new_houses_df$Year.Built),
+                                  to = max(new_houses_df$Year.Built),
+                                  length.out = 200))
+
+pred_year_quad <- predict(year_quad, newdata = new.data)
+```
+
+```{r}
+plot(price ~ Year.Built, 
+     data=new_houses_df, 
+     main="Non-linear relationship between \nyear built and house price")
+
+abline(year_linear, lwd = 3, lty = 1, col = "blue")
+lines(pred_year_quad ~ new.data$Year.Built, col = "red", lwd=3)
+```
+
+A quadratic polynomial is sufficient to describe the relationship between `Year.Built` and `price`.
+
+```{r}
+quality_linear = lm(price ~ Overall.Qual, data=new_houses_df)
+quality_quad = lm(price ~ Overall.Qual + I(Overall.Qual^2), data=new_houses_df)
+quality_cubic = lm(price ~ Overall.Qual + I(Overall.Qual^2) + I(Overall.Qual^3), data=new_houses_df)
+
+new.data <- data.frame(Overall.Qual = seq(from = min(new_houses_df$Overall.Qual),
+                                  to = max(new_houses_df$Overall.Qual),
+                                  length.out = 200))
+
+pred_quality_quad <- predict(quality_quad, newdata = new.data)
+pred_quality_cubic <- predict(quality_cubic, newdata = new.data)
+```
+
+```{r}
+plot(price ~ Overall.Qual, 
+     data=new_houses_df, 
+     main="Non-linear relationship between \n construction quality and house price")
+
+abline(quality_linear, lwd = 3, lty = 1, col = "blue")
+lines(pred_quality_quad ~ new.data$Overall.Qual, col = "red", lwd=3)
+lines(pred_quality_cubic ~ new.data$Overall.Qual, col = "green", lwd=3)
+```
+
+A cubic polynomial is sufficient to describe the relationship between `Overall.Qual` and `price`.
+
+### Interaction terms
+
+We hypothesize that `area` and `NeighborhoodNridgHt` should have an interactive effect on house price. This is because the same unit increase in floor area should cost more in a fancy neighborhood compared to a modest neighborhood.
+
+```{r}
+area_neigh = lm(price ~ area + NeighborhoodNridgHt + area:NeighborhoodNridgHt, data = new_houses_df)
+
+beta_hats = coef(area_neigh)
+int_not_neigh = beta_hats[1] 
+slope_not_neigh = beta_hats[2]
+int_neigh = beta_hats[1] + beta_hats[3]
+slope_neigh = beta_hats[2] + beta_hats[4]
+
+
+plot(price ~ area, 
+     data = new_houses_df, 
+     col = alpha(NeighborhoodNridgHt + 1, 0.5), pch=20, cex = 1, 
+     main="Neighborhood and floor area interact")
+
+abline(int_not_neigh, slope_not_neigh, col = 1, lty = 1, lwd = 2)
+abline(int_neigh, slope_neigh, col = 2, lty = 2, lwd = 2)
+legend("topleft", c("Northridge Heights", "Other"), pch=20, col = c(2, 1))
+
+```
+
+We observe that for a unit increase in floor area, the price of houses in the Northridge Heights neighborhood increase more than houses in other neighborhoods. This suggests that Northridge Heights is a luxury neighborhood.
+
+Similarly, we hypothesize that `area` and `Overall.Qual` should have an interactive effect on house price. This is because the same unit increase in floor area should cost more when the construction quality of the house is higher.
+
+```{r}
+qplot(area, price, 
+      colour=Overall.Qual, 
+      main="Construction quality and floor area interact",
+      data = new_houses_df)
+```
+
+We observe that for houses with the same area, the houses with a higher construction quality are more expensive.
+
+### Adding the derived predictors to the model
+
+```{r}
+right_hand_side = paste(c(attr(linear$terms , "term.labels"),
+                          "I(Year.Built^2)", 
+                          "I(Overall.Qual^2)",
+                          "I(Overall.Qual^3)",
+                          "NeighborhoodNridgHt:area", 
+                          "Overall.Qual:area"), 
+                        collapse="+")
+
+formula_string = paste("((price ^ (best_lambda) - 1) / best_lambda) ~ ", right_hand_side, collapse = "")
+linear_interact = lm(as.formula(formula_string), data=new_houses_df)
+```
+
+```{r}
+summary(linear_interact)
+```
+
+Adding the higher-order predictors inflated the p-values of the original predictors. This is because the higher-order predictors are products of the original predictors, so they are correlated.
+
+```{r}
+anova(linear_box, linear_interact)
+```
+
+The ANOVA test has a p-value smaller than 0.05. Hence, at least one of the higher-order predictors is linearly related to house price, given that all the original predictors are used in the model.
+
+## 3.1 Influential observations
+
+```{r, fig.width=5, fig.height=5}
+plot(linear_interact, which=5)
+```
+
+```{r}
+influential_indices = which(cooks.distance(linear_interact) > 4 / 
+                            length(cooks.distance(linear_interact)), arr.ind=TRUE)
+length(influential_indices)
+```
+
+The higher-order predictors barely changed the no. of influential observations.
+
+#### Outliers
+
+```{r}
+length(which(abs(rstandard(linear_interact)) > 2))
+```
+
+The higher-order predictors barely changed the no. of outliers.
+
+#### High-leverage observations
+
+```{r}
+length(which(hatvalues(linear_interact) > 2 * mean(hatvalues(linear_interact))))
+```
+
+The higher-order predictors increased the no. of high-leverage observations. This is because adding more predictors increased the dimensionality of the predictor space, so the observations are further apart.
+
+## 3.2 Model evaluation
+
+#### PRESS Statistic
+
+```{r}
+y = new_houses_df$price
+y_pred = (best_lambda * fitted(linear_interact) + 1) ** (1/best_lambda)
+
+loocv_rmse = sqrt(sum(((y - y_pred) / (1 - hatvalues(linear_interact)))^2) / nrow(new_houses_df))
+                  
+format_loocv_rmse = format(round(loocv_rmse, 2), nsmall=1, big.mark=",")
+paste("LOOCV RMSE: $", format_loocv_rmse)
+```
+
+The higher-order predictors decreased the model's average house price prediction error.
+
+#### AIC, BIC, Adjusted R-squared
+
+```{r}
+sprintf("AIC: %.2f", AIC(linear_interact))
+sprintf("BIC: %.2f", BIC(linear_interact))
+sprintf("Adjusted R squared: %.2f", summary(linear_interact)$adj.r.squared)
+```
+
+The higher-order predictors decreased the AIC and BIC slightly. The higher-order predictors also increased the adjusted R-squared slightly to 0.90. This indicates that the higher-order predictors significantly increased the goodness of fit (enough to overcome the effect of increasing the no. of predictors).
+
+## 3.3 Model diagnostics
+
+#### Residual plot, Breusch-Pagan test
+
+```{r, fig.width=5, fig.height=5}
+plot(fitted(linear_interact), resid(linear_interact), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Residual plot")
+abline(h = 0, col = "darkorange", lwd = 2)
+```
+
+The higher-order predictors did not affect the linearity assumption (it is still satisfied).
+
+```{r}
+bptest(linear_interact)
+```
+
+The higher-order predictors did not fix the violation of the equal variance assumption.
+
+#### Normal QQ Plot, Shapiro-Wilk test
+
+```{r, fig.width=5, fig.height=5}
+qqnorm(resid(linear_interact))
+qqline(resid(linear_interact), col = "dodgerblue", lwd = 2)
+```
+
+```{r}
+shapiro.test(resid(linear_interact))
+```
+
+The higher-order predictors did not fix the violation of the normality assumption.
+
+# Mean absolute error of final model
+
+#### Training set error
+
+```{r}
+y = new_houses_df$price
+y_pred = (best_lambda * fitted(linear_interact) + 1) ** (1/best_lambda)
+(sum(abs(y - y_pred)))/nrow(new_houses_df)
+
+```
+
+#### LOOCV error
+
+```{r}
+e_cv_linear = numeric(nrow(new_houses_df))
+for (i in 1:nrow(new_houses_df))
+{
+  # Remove the ith observation
+  training_data <- new_houses_df[-i, ]
+
+  # Fit models using training_data
+  cv_linear <- lm(as.formula(formula_string), data=training_data)
+  
+  y_pred = (best_lambda * predict(cv_linear, newdata = new_houses_df[i, ]) + 1) ** (1/best_lambda)
+  
+  # Prediction for the ith observation and obtain the residual
+  e_cv_linear[i] <- new_houses_df[i, "price"] - y_pred
+}
+
+sum(abs(e_cv_linear))/nrow(new_houses_df)
+```
